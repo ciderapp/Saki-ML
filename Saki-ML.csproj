@@ -14,9 +14,9 @@
     <Folder Include="Services\" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.ML" Version="4.0.0" />
-    <PackageReference Include="Microsoft.ML.TorchSharp" Version="0.22.0" />
-    <PackageReference Include="System.Threading.Channels" Version="8.0.0" />
+    <PackageReference Include="Microsoft.ML" Version="4.0.2" />
+    <PackageReference Include="Microsoft.ML.TorchSharp" Version="0.22.2" />
+    <PackageReference Include="System.Threading.Channels" Version="9.0.8" />
     <PackageReference Include="TorchSharp" Version="0.105.1" />
     <PackageReference Include="TorchSharp-cpu" Version="0.105.1" />
   </ItemGroup>
