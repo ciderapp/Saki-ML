@@ -1,0 +1,27 @@
+# Experimental Alpine image. TorchSharp on Alpine may require additional native deps.
+FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build
+WORKDIR /src
+
+RUN apk add --no-cache icu-libs gcompat libstdc++ libgcc libgomp
+
+COPY ["Saki-ML.sln", "/src/"]
+COPY ["Saki-ML.csproj", "/src/"]
+RUN dotnet restore "/src/Saki-ML.csproj"
+
+COPY . .
+RUN dotnet publish "Saki-ML.csproj" -c Release -o /app/publish -r linux-musl-x64 --self-contained true /p:UseAppHost=true
+
+FROM alpine:3.19 AS final
+WORKDIR /app
+
+RUN apk add --no-cache icu-libs gcompat libstdc++ libgcc libgomp ca-certificates tzdata
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080
+
+EXPOSE 8080
+
+COPY --from=build /app/publish .
+
+ENTRYPOINT ["/app/Saki-ML"]
+
+
