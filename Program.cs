@@ -134,7 +134,9 @@ public sealed class MlNetClassificationService : IClassificationService
     {
         var input = new SpamClassifier.ModelInput { Label = string.Empty, Text = text };
         var output = SpamClassifier.Predict(input);
-        var scores = SpamClassifier.GetSortedScoresWithLabels(output).ToArray();
+        var scores = SpamClassifier.GetSortedScoresWithLabels(output)
+            .Select(kv => new KeyValuePair<string, decimal>(kv.Key, ClampScoreDecimal(kv.Value)))
+            .ToArray();
         var top = scores.FirstOrDefault();
         return new ClassificationResult
         {
@@ -143,13 +145,21 @@ public sealed class MlNetClassificationService : IClassificationService
             Scores = scores.Select(kv => new LabelScore(kv.Key, kv.Value)).ToArray()
         };
     }
+
+    private static decimal ClampScoreDecimal(float score)
+    {
+        // Clamp to [0, 1] and round to 7 decimal places
+        var clamped = Math.Clamp(score, 0f, 1f);
+        var asDecimal = (decimal)clamped;
+        return Math.Round(asDecimal, 7, MidpointRounding.AwayFromZero);
+    }
 }
 
-public sealed record LabelScore(string Label, float Score);
+public sealed record LabelScore(string Label, decimal Score);
 
 public sealed class ClassificationResult
 {
     public string PredictedLabel { get; set; } = string.Empty;
-    public float Confidence { get; set; }
+    public decimal Confidence { get; set; }
     public LabelScore[] Scores { get; set; } = Array.Empty<LabelScore>();
 }
