@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Saki-ML": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:57134;http://localhost:57135"
+    }
+  }
+}
