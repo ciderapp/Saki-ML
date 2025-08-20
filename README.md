@@ -7,6 +7,9 @@ Spam classification microservice for Saki using ML.NET. It exposes a fast HTTP A
 - Background queue with a single worker for thread-safe inference
 - Simple API key header authentication
 - Minimal HTTP API: `/classify` and `/health`
+- Analytics endpoints: `/analytics`, `/analytics/last/{minutes}`
+- Unsure insights: `/insights/unsure`, `/insights/unsure/last/{minutes}`
+- Configuration diagnostics: `/config/diagnostics`
 - Single-file, self-contained builds with ReadyToRun
 - Docker images for Debian-slim (recommended) and Alpine (experimental)
 
@@ -55,6 +58,8 @@ out\win-x64\Saki-ML.exe
 - `SAKI_ML_API_KEY` (required in production): API key for requests
 - `QueueCapacity` (optional, default 1000): bounded queue size
 - `ASPNETCORE_URLS` (optional): host/port binding, default `http://0.0.0.0:8080`
+- `UnsureThreshold` (optional, default 0.75): if top confidence is below this, verdict is `Unsure`
+- `BlockThreshold` (optional, default 0.85): minimum confidence to auto-block when label is `spam`
 
 ## API
 ### Health
@@ -76,9 +81,24 @@ out\win-x64\Saki-ML.exe
   "Scores": [
     { "Label": "spam", "Score": 0.94 },
     { "Label": "ham",  "Score": 0.06 }
-  ]
+  ],
+  "Verdict": "Block",
+  "Blocked": true,
+  "Color": "#DC2626",
+  "DurationMs": 1.72,
+  "Explanation": "High confidence spam; message should be blocked."
 }
 ```
+### Analytics
+- `GET /analytics` → lifetime process stats
+- `GET /analytics/last/{minutes}` → rolling window stats
+
+### Unsure insights
+- `GET /insights/unsure?take=50` → most recent unsure items
+- `GET /insights/unsure/last/{minutes}?take=50` → unsure items in a time window
+
+### Configuration diagnostics
+- `GET /config/diagnostics` → recommended settings and warnings
 
 Example curl:
 ```bash

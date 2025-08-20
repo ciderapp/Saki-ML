@@ -9,8 +9,32 @@ using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Saki_ML.Contracts;
+using Saki_ML.Services;
+using System.Text.Json.Serialization;
+using Saki_ML.Utils;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(options =>
+{
+    options.SingleLine = true;
+    options.TimestampFormat = "HH:mm:ss.fff ";
+    options.IncludeScopes = false;
+});
+// Category filters with env-configurable levels
+var appLogLevel = ParseLogLevel(builder.Configuration["LogLevel:App"] ?? Environment.GetEnvironmentVariable("SAKI_ML_LOG_LEVEL_APP")) ?? LogLevel.Information;
+var frameworkLogLevel = ParseLogLevel(builder.Configuration["LogLevel:Framework"] ?? Environment.GetEnvironmentVariable("SAKI_ML_LOG_LEVEL_MS")) ?? LogLevel.Warning;
+builder.Logging.AddFilter((category, level) =>
+{
+    if (!string.IsNullOrEmpty(category) &&
+        (category.StartsWith("Microsoft", StringComparison.Ordinal) || category.StartsWith("System", StringComparison.Ordinal)))
+    {
+        return level >= frameworkLogLevel;
+    }
+    return level >= appLogLevel;
+});
 
 // Configuration
 var configuration = builder.Configuration;
@@ -27,7 +51,15 @@ builder.Services.AddSingleton(Channel.CreateBounded<ClassificationRequest>(new B
 }));
 builder.Services.AddSingleton<IClassificationQueue, ChannelClassificationQueue>();
 builder.Services.AddSingleton<IClassificationService, MlNetClassificationService>();
+builder.Services.AddSingleton<IAnalyticsService, InMemoryAnalyticsService>();
+builder.Services.AddSingleton<IConfigurationDiagnostics, ConfigurationDiagnostics>();
+builder.Services.AddSingleton<IInsightsBuffer, InMemoryInsightsBuffer>();
 builder.Services.AddHostedService<ClassificationWorker>();
+
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
 
 var app = builder.Build();
 
@@ -51,7 +83,7 @@ app.Use(async (context, next) =>
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-app.MapPost("/classify", async (HttpContext http, IClassificationQueue queue) =>
+app.MapPost("/classify", async (HttpContext http, IClassificationQueue queue, IAnalyticsService analytics, IInsightsBuffer insights, ILoggerFactory loggerFactory) =>
 {
     var request = await http.Request.ReadFromJsonAsync<ClassificationRequestBody>();
     if (request == null || string.IsNullOrWhiteSpace(request.Text))
@@ -59,107 +91,71 @@ app.MapPost("/classify", async (HttpContext http, IClassificationQueue queue) =>
         return Results.BadRequest(new { error = "text is required" });
     }
 
+    var start = System.Diagnostics.Stopwatch.StartNew();
     var result = await queue.EnqueueAndWaitAsync(request.Text, http.RequestAborted);
+    start.Stop();
+    result.DurationMs = start.Elapsed.TotalMilliseconds;
+    analytics.Record(result.Verdict.ToString(), result.Blocked, result.DurationMs);
+    var logger = loggerFactory.CreateLogger("Classification");
+    var verdictStyled = Ansi.Colorize(LogStyle.Glyph(result.Verdict) + " " + result.Verdict, result.Color);
+    var labelStyled = Ansi.Colorize(result.PredictedLabel, result.Color);
+    string pct(decimal d) => (d * 100m).ToString("0.00");
+    var topScores = string.Join("/", result.Scores.Take(2).Select(s => $"{s.Label}:{pct(s.Score)}%"));
+    var minimal = (Environment.GetEnvironmentVariable("SAKI_ML_LOG_MINIMAL") ?? "true").Equals("true", StringComparison.OrdinalIgnoreCase);
+    if (minimal && !logger.IsEnabled(LogLevel.Debug))
+    {
+        logger.LogInformation("{Verdict} {Label} {Pct}% {Latency}ms [{Scores}] :: {Text}", verdictStyled, labelStyled, pct(result.Confidence), Math.Round(result.DurationMs, 2), topScores, TextUtils.Truncate(request.Text));
+    }
+    else
+    {
+        var ip = http.Connection.RemoteIpAddress?.ToString() ?? "-";
+        var reqId = http.TraceIdentifier;
+        logger.LogInformation("{Verdict} {Label} {Pct}% {Latency}ms [{Scores}] ip={IP} id={Id} :: {Text}", verdictStyled, labelStyled, pct(result.Confidence), Math.Round(result.DurationMs, 2), topScores, ip, reqId, TextUtils.Truncate(request.Text));
+    }
+    if (result.Verdict == ClassificationVerdict.Unsure)
+    {
+        insights.RecordUnsure(request.Text, result);
+    }
     return Results.Ok(result);
+});
+
+// Analytics endpoints
+app.MapGet("/analytics", (IAnalyticsService analytics) => Results.Ok(analytics.Snapshot()))
+   .WithName("AnalyticsSnapshot");
+app.MapGet("/analytics/last/{minutes:int}", (int minutes, IAnalyticsService analytics) =>
+{
+    var period = TimeSpan.FromMinutes(Math.Max(1, minutes));
+    return Results.Ok(analytics.Snapshot(period));
+});
+
+// Configuration diagnostics
+app.MapGet("/config/diagnostics", (IConfigurationDiagnostics diag) => Results.Ok(diag.Inspect()));
+
+// Unsure insights endpoints
+app.MapGet("/insights/unsure", (IInsightsBuffer insights, int take) => Results.Ok(insights.GetRecent(take <= 0 ? 50 : take)));
+app.MapGet("/insights/unsure/last/{minutes:int}", (IInsightsBuffer insights, int minutes, int take) =>
+{
+    var period = TimeSpan.FromMinutes(Math.Max(1, minutes));
+    return Results.Ok(insights.GetRecent(take <= 0 ? 50 : take, period));
 });
 
 app.Run();
 
-public record ClassificationRequestBody(string Text);
-
-public interface IClassificationQueue
+static LogLevel? ParseLogLevel(string? value)
 {
-    Task<ClassificationResult> EnqueueAndWaitAsync(string text, CancellationToken cancellationToken);
+    if (string.IsNullOrWhiteSpace(value)) return null;
+    return value.Trim().ToLowerInvariant() switch
+    {
+        "trace" => LogLevel.Trace,
+        "debug" => LogLevel.Debug,
+        "information" or "info" => LogLevel.Information,
+        "warning" or "warn" => LogLevel.Warning,
+        "error" => LogLevel.Error,
+        "critical" or "fatal" => LogLevel.Critical,
+        "none" => LogLevel.None,
+        _ => null
+    };
 }
 
-public sealed class ChannelClassificationQueue : IClassificationQueue
-{
-    private readonly Channel<ClassificationRequest> _channel;
+// moved truncate to Saki_ML.Utils.TextUtils
 
-    public ChannelClassificationQueue(Channel<ClassificationRequest> channel)
-    {
-        _channel = channel;
-    }
-
-    public async Task<ClassificationResult> EnqueueAndWaitAsync(string text, CancellationToken cancellationToken)
-    {
-        var tcs = new TaskCompletionSource<ClassificationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var request = new ClassificationRequest(text, tcs);
-        await _channel.Writer.WriteAsync(request, cancellationToken);
-        return await tcs.Task.WaitAsync(cancellationToken);
-    }
-}
-
-public sealed record ClassificationRequest(string Text, TaskCompletionSource<ClassificationResult> Completion);
-
-public sealed class ClassificationWorker : BackgroundService
-{
-    private readonly Channel<ClassificationRequest> _channel;
-    private readonly IClassificationService _service;
-    private readonly ILogger<ClassificationWorker> _logger;
-
-    public ClassificationWorker(Channel<ClassificationRequest> channel, IClassificationService service, ILogger<ClassificationWorker> logger)
-    {
-        _channel = channel;
-        _service = service;
-        _logger = logger;
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        await foreach (var req in _channel.Reader.ReadAllAsync(stoppingToken))
-        {
-            try
-            {
-                var result = _service.Classify(req.Text);
-                req.Completion.TrySetResult(result);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Classification failed");
-                req.Completion.TrySetException(ex);
-            }
-        }
-    }
-}
-
-public interface IClassificationService
-{
-    ClassificationResult Classify(string text);
-}
-
-public sealed class MlNetClassificationService : IClassificationService
-{
-    public ClassificationResult Classify(string text)
-    {
-        var input = new SpamClassifier.ModelInput { Label = string.Empty, Text = text };
-        var output = SpamClassifier.Predict(input);
-        var scores = SpamClassifier.GetSortedScoresWithLabels(output)
-            .Select(kv => new KeyValuePair<string, decimal>(kv.Key, ClampScoreDecimal(kv.Value)))
-            .ToArray();
-        var top = scores.FirstOrDefault();
-        return new ClassificationResult
-        {
-            PredictedLabel = output.PredictedLabel,
-            Confidence = top.Value,
-            Scores = scores.Select(kv => new LabelScore(kv.Key, kv.Value)).ToArray()
-        };
-    }
-
-    private static decimal ClampScoreDecimal(float score)
-    {
-        // Clamp to [0, 1] and round to 7 decimal places
-        var clamped = Math.Clamp(score, 0f, 1f);
-        var asDecimal = (decimal)clamped;
-        return Math.Round(asDecimal, 7, MidpointRounding.AwayFromZero);
-    }
-}
-
-public sealed record LabelScore(string Label, decimal Score);
-
-public sealed class ClassificationResult
-{
-    public string PredictedLabel { get; set; } = string.Empty;
-    public decimal Confidence { get; set; }
-    public LabelScore[] Scores { get; set; } = Array.Empty<LabelScore>();
-}
