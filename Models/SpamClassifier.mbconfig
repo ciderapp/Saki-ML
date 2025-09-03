@@ -43,8 +43,8 @@
         "Version": 1,
         "Type": "Trial",
         "TrainerName": "TextClassificationMulti",
-        "Score": -1.6804499272851638,
-        "RuntimeInSeconds": 52.403,
+        "Score": -0.37802989285948,
+        "RuntimeInSeconds": 38.959,
         "Parameter": {
           "_SCHEMA_": "e0 * e1 * e2",
           "e0": {
@@ -82,7 +82,7 @@
   "TrainingOption": {
     "Version": 1,
     "Type": "TextClassficationTrainingOption",
-    "TrainingTime": 10,
+    "TrainingTime": 2147483647,
     "OptimizeMetric": "LogLoss-Reduction",
     "LabelColumn": "label",
     "TextColumn": "text",
